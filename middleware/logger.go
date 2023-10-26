@@ -16,7 +16,6 @@ import (
 
 	"github.com/ehgks0000/rf-server-go/utils"
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 )
 
 var LOGFILEBASE = "./logs/info/"
@@ -25,15 +24,7 @@ var _f *os.File
 var _today time.Time = time.Now()
 
 func init() {
-
 	var err error
-
-	err = godotenv.Load()
-	if err != nil {
-		log.Panicf("Error loading .env file")
-		// os.Exit(1)
-	}
-
 	env := os.Getenv("APP_ENV")
 
 	var infoLogFile = LOGFILEBASE + time.Now().Format("2006-01-02") + ".log"

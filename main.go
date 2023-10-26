@@ -1,10 +1,13 @@
 package main
 
 import (
+	"log"
 	"net/http"
+	"os"
 
 	"github.com/ehgks0000/rf-server-go/middleware"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 )
 
 type createUserRequest struct {
@@ -15,6 +18,21 @@ type createUserRequest struct {
 }
 
 func main() {
+
+	pid := os.Getpid()
+	log.Println("pid :", pid)
+
+	envFile := ".env"
+	if len(os.Args) > 1 {
+		envFile = os.Args[1]
+	}
+
+	err := godotenv.Load(envFile)
+	if err != nil {
+		log.Fatalf("Error loading %s file", envFile)
+	}
+
+	port := os.Getenv("PORT")
 	// Gin 엔진 인스턴스를 생성합니다.
 	r := gin.Default()
 
@@ -38,8 +56,7 @@ func main() {
 		ctx.JSON(http.StatusOK, req)
 	})
 
-	// 3001 포트에서 서버를 실행합니다.
-	r.Run(":3001")
+	r.Run(port)
 }
 
 func errorResponse(err error) gin.H {
