@@ -35,7 +35,7 @@ func NewServer() (*Server, error) {
 	if err != nil {
 		logger.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	// defer db.Close()
 
 	// MySQL 데이터베이스 연결 테스트
 	err = db.Ping()

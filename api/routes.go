@@ -15,6 +15,7 @@ func (server *Server) setupPostRoutes(r *gin.Engine, route string) {
 	postGroups := r.Group(route)
 
 	postGroups.GET("/public", server.GetRandomPostPublic)
+
 }
 
 func (server *Server) setupRoutes() {

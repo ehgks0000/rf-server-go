@@ -3,9 +3,12 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ehgks0000/rf-server-go/utils"
@@ -15,12 +18,13 @@ import (
 )
 
 type getRandomPostPublic struct {
-	Take int    `form:"take,default=21" binding:"min=0,max=21"`
-	Sex  string `form:"sex" binding:"oneof=Male Female"`
+	Take int     `form:"take,default=21" binding:"min=0,max=21"`
+	Sex  *string `form:"sex" binding:"omitempty,oneof=Male Female"`
 }
 
-func (server *Server) GetRandomPostPublic(c *gin.Context) {
+const ES_POSTS_INDEX = "posts"
 
+func (server *Server) GetRandomPostPublic(c *gin.Context) {
 	var req getRandomPostPublic
 	if err := c.ShouldBindQuery(&req); err != nil {
 		c.JSON(http.StatusBadRequest, err.Error())
@@ -29,13 +33,11 @@ func (server *Server) GetRandomPostPublic(c *gin.Context) {
 
 	dateRange := utils.GetDateRange(time.Now())
 
-	index := "posts"
 	params := SearchParams{
-		Index:     index,
+		Index:     ES_POSTS_INDEX,
 		Size:      req.Take,
-		Sex:       (*Sex)(&req.Sex),
+		Sex:       (*Sex)(req.Sex),
 		DateRange: dateRange,
-		// 다른 필드들도 여기에 설정합니다.
 	}
 
 	data, err := getRandomPostsElasticSearchService(params, server.es)
@@ -58,19 +60,158 @@ func (server *Server) GetRandomPostPublic(c *gin.Context) {
 	}
 
 	// _source들만 추출합니다.
-	sources := make([]map[string]interface{}, len(esResponse.Hits.Hits))
-	for i, hit := range esResponse.Hits.Hits {
-		sources[i] = hit.Source
+	var ids []int
+
+	// 각 hit에서 _source의 ID를 추출하고 슬라이스에 추가합니다.
+	for _, hit := range esResponse.Hits.Hits {
+		ids = append(ids, hit.Source.ID)
+	}
+
+	posts := server.getRandomPostsPublicSql(ids)
+
+	sex := "None"
+	if req.Sex != nil {
+		sex = *req.Sex
 	}
 
 	response := gin.H{
-		"take": req.Take,
-		"sex":  req.Sex,
-		"data": sources,
+		"take":  req.Take,
+		"sex":   sex,
+		"size":  len(posts),
+		"posts": posts,
 	}
 
 	// sources를 JSON으로 반환합니다.
 	c.JSON(http.StatusOK, response)
+}
+
+type Image struct {
+	URL string `json:"url"`
+}
+
+type Profile struct {
+	Avatar *string `json:"avartar"`
+	// Avatar sql.NullString `json:"avartar,omitempty"`
+}
+
+type User struct {
+	ID      int     `json:"id"`
+	Name    string  `json:"name"`
+	Profile Profile `json:"profile"`
+}
+
+type Count struct {
+	Favorites int `json:"favorites"`
+}
+
+type Post struct {
+	IsFavorite bool    `json:"isFavorite"`
+	IsFollow   bool    `json:"isFollow"`
+	IsScrap    bool    `json:"isScrap"`
+	ID         int     `json:"id"`
+	CreatedAt  string  `json:"createdAt"`
+	Images     []Image `json:"images"`
+	User       User    `json:"user"`
+	Count      Count   `json:"_count"`
+}
+
+func (server *Server) getRandomPostsPublicSql(postIDs []int) []Post {
+
+	args := make([]interface{}, len(postIDs))
+	for i, id := range postIDs {
+		args[i] = id
+	}
+	placeholders := strings.Repeat("?,", len(postIDs)-1) + "?"
+	sqlQuery := fmt.Sprintf(`
+			SELECT
+				posts.id,
+				posts.created_at,
+				images.url,
+				COUNT(favorites.id) AS favoritesCount,
+				users.id,
+				users.name,
+				profiles.avartar
+			FROM
+				posts
+			JOIN
+				users ON users.id = posts.user_id
+			LEFT JOIN
+				profiles ON profiles.user_id = users.id
+			LEFT JOIN
+				images ON images.post_id = posts.id
+			LEFT JOIN
+				favorites ON favorites.post_id = posts.id
+			WHERE
+				posts.id IN (%s)
+			GROUP BY
+				posts.id,
+				images.id,
+				users.id,
+				profiles.id
+			ORDER BY
+				posts.created_at DESC;
+		`, placeholders)
+
+	rows, err := server.db.Query(sqlQuery, args...)
+
+	if err != nil {
+		server.logger.Println("Database query failed: ", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var posts []Post
+	for rows.Next() {
+
+		var (
+			postID    int
+			createdAt string
+			imageURL  string
+			count     int
+			userID    int
+			userName  string
+			avatar    sql.NullString // avatar가 NULL 일 수 있기 때문에
+		)
+
+		err := rows.Scan(&postID, &createdAt, &imageURL, &count, &userID, &userName, &avatar)
+		if err != nil {
+			server.logger.Fatal(err)
+			return nil
+		}
+
+		var avatarPtr *string
+		if avatar.Valid {
+			avatarPtr = &avatar.String
+		}
+
+		post := Post{
+			ID:        postID,
+			CreatedAt: createdAt,
+			Images: []Image{
+				{URL: imageURL},
+			},
+			User: User{
+				ID:   userID,
+				Name: userName,
+				Profile: Profile{
+					Avatar: avatarPtr, // sql.NullString의 값 가져오기
+				},
+			},
+			Count: Count{
+				Favorites: count,
+			},
+		}
+
+		posts = append(posts, post)
+	}
+
+	// 에러 체크
+	if err := rows.Err(); err != nil {
+		server.logger.Fatal(err)
+		return nil
+	}
+
+	return posts
 }
 
 type Sex string
@@ -79,7 +220,10 @@ type Order string
 type ElasticSearchResponse struct {
 	Hits struct {
 		Hits []struct {
-			Source map[string]interface{} `json:"_source"`
+			Source struct {
+				ID int `json:"id"`
+			} `json:"_source"`
+			// Source map[string]interface{} `json:"_source"`
 		} `json:"hits"`
 	} `json:"hits"`
 }
